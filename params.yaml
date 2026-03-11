@@ -1,0 +1,10 @@
+model:
+  candidate_k: 25000
+  max_positive_samples: 200000
+  negative_ratio: 6
+  random_state: 42
+
+pipeline:
+  timeout_sec: 600
+  max_transaction_rows: null
+  max_offer_seens_rows: null

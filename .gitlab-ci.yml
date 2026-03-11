@@ -1,0 +1,13 @@
+image: "alpine:3.20"
+
+stages:
+  - validate
+
+validate:
+  stage: validate
+  script:
+    - test -f Dockerfile || (echo "Missing Dockerfile" && exit 1)
+    - test -f docker-compose.yml || (echo "Missing docker-compose.yml" && exit 1)
+    - test -f dvc.yaml || (echo "Missing dvc.yaml" && exit 1)
+    - test -f params.yaml || (echo "Missing params.yaml" && exit 1)
+    - echo "Basic repository checks passed"

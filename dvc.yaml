@@ -1,0 +1,8 @@
+stages:
+  report:
+    cmd: python -c "from pathlib import Path; Path('reports').mkdir(exist_ok=True); Path('reports/dvc_done').write_text('ok')"
+    deps: []
+    params:
+      - params.yaml
+    outs:
+      - reports/dvc_done

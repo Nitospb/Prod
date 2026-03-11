@@ -1,0 +1,570 @@
+openapi: "3.0.1"
+info:
+  title: Look-a-Like Service API
+  description: ML service for building a look-a-like audience for a specific merchant offer with automatic data drift detection. Data is ingested through a streaming batch API.
+  version: "3.0"
+servers:
+  - url: http://localhost:80
+
+paths:
+  /ready:
+    get:
+      summary: Readiness Check
+      tags: [Health]
+      responses:
+        "200":
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+        "503":
+          description: Service is not ready
+
+  /data/batch:
+    post:
+      summary: Data Batch Upload
+      description: |
+        Uploads a batch of records for one table. Can be called multiple times.
+        Batches may arrive in arbitrary order and interleaved across tables.
+        Large tables are split into multiple batches.
+
+        **Idempotency:** a repeated call with the same `version` + `table` + `batch_id`
+        must not duplicate records.
+        Missing required fields or unknown `table` values must return `400`.
+      tags: [Data]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DataBatchRequest"
+      responses:
+        "200":
+          description: Batch accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DataBatchResponse"
+        "400":
+          description: Invalid request
+
+  /data/commit:
+    post:
+      summary: Data Version Commit
+      description: |
+        Signal that all data for the specified version has been uploaded.
+        The service starts asynchronous processing in the background:
+        feature building, drift check, and retraining decision.
+
+        **Idempotency:** a repeated commit with the same `version`
+        must not trigger the pipeline again.
+        The first successful commit closes the data version snapshot.
+        Commit before receiving batches must be handled gracefully (no 500):
+        processing is skipped for invalid/incomplete data.
+      tags: [Data]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DataCommitRequest"
+      responses:
+        "200":
+          description: Commit accepted, processing started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DataCommitResponse"
+        "400":
+          description: Invalid request
+
+  /status:
+    get:
+      summary: Service and Pipeline Status
+      description: |
+        Current state: readiness for requests, model version,
+        data version, and processing pipeline status.
+      tags: [Pipeline]
+      responses:
+        "200":
+          description: Current status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
+  /lookalike:
+    post:
+      summary: Look-a-Like Audience for an Offer
+      tags: [Inference]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LookalikeRequest"
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LookalikeResponse"
+        "400":
+          description: Invalid request
+        "404":
+          description: Merchant or offer not found
+        "503":
+          description: Model is not ready
+
+  /lookalike/batch:
+    post:
+      summary: Look-a-Like Batch
+      tags: [Inference]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - requests
+              properties:
+                requests:
+                  type: array
+                  minItems: 1
+                  items:
+                    $ref: "#/components/schemas/LookalikeRequest"
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - results
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/LookalikeResponse"
+        "400":
+          description: Invalid request
+
+  /model/info:
+    get:
+      summary: Model Information (lineage)
+      description: |
+        Model metadata including lineage: what data it was trained on,
+        number of features, and training metrics.
+      tags: [Model]
+      responses:
+        "200":
+          description: Model metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelInfoResponse"
+
+  /monitoring/drift:
+    get:
+      summary: Data Drift Status
+      description: |
+        Result of the latest drift check: whether drift was detected,
+        numeric score, and what action the service took.
+      tags: [Monitoring]
+      responses:
+        "200":
+          description: Drift check result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DriftResponse"
+
+  /monitoring/data-quality:
+    get:
+      summary: Data Validation Result (Great Expectations)
+      description: |
+        Validation result for the latest received data version.
+        The exact checks to implement are up to the participant.
+        If data fails validation (`valid: false`), the model must not
+        be trained on it.
+      tags: [Monitoring]
+      responses:
+        "200":
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DataQualityResponse"
+
+  /experiments:
+    get:
+      summary: Experiment History (MLflow)
+      description: |
+        List of all experiments (model training runs) in the current session.
+        Each training or retraining run must be logged as an experiment.
+      tags: [Monitoring]
+      responses:
+        "200":
+          description: Experiment list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExperimentsResponse"
+
+components:
+  schemas:
+    DataBatchRequest:
+      type: object
+      additionalProperties: true
+      required:
+        - version
+        - table
+        - batch_id
+        - total_batches
+        - records
+      properties:
+        version:
+          type: string
+          description: Data version identifier
+          example: "v2"
+        table:
+          type: string
+          description: Logical table name
+          example: "transaction"
+        batch_id:
+          type: integer
+          description: Batch number (starting from 1)
+          minimum: 1
+          example: 1
+        total_batches:
+          type: integer
+          description: Total number of batches for this table in this version
+          minimum: 1
+          example: 3
+        records:
+          type: array
+          description: Array of table records (empty array is allowed as no-op)
+          items:
+            type: object
+            additionalProperties: true
+
+    DataBatchResponse:
+      type: object
+      additionalProperties: true
+      required:
+        - status
+        - table
+        - batch_id
+      properties:
+        status:
+          type: string
+          example: "accepted"
+        table:
+          type: string
+          example: "transaction"
+        batch_id:
+          type: integer
+          example: 1
+
+    DataCommitRequest:
+      type: object
+      additionalProperties: true
+      required:
+        - version
+      properties:
+        version:
+          type: string
+          description: Data version identifier to commit
+          example: "v2"
+
+    DataCommitResponse:
+      type: object
+      additionalProperties: true
+      required:
+        - status
+        - tables_received
+      properties:
+        status:
+          type: string
+          example: "accepted"
+        tables_received:
+          type: array
+          description: List of tables received for this version
+          items:
+            type: string
+          example:
+            - "people"
+            - "segments"
+            - "transaction"
+            - "offer"
+            - "merchant"
+            - "financial_account"
+            - "offer_seens"
+            - "offer_activation"
+            - "offer_reward"
+            - "receipts"
+
+    StatusResponse:
+      type: object
+      additionalProperties: true
+      required:
+        - ready
+        - model_version
+        - data_version
+        - pipeline_status
+      properties:
+        ready:
+          type: boolean
+          description: Service is ready to respond to /lookalike
+          example: true
+        model_version:
+          type: string
+          description: Current model version
+          example: "2.0"
+        data_version:
+          type: string
+          description: Latest successfully processed data-catalog version (can be newer than model `trained_on`)
+          example: "v2"
+        pipeline_status:
+          type: string
+          description: Data processing pipeline status (successful completion returns to `idle`)
+          example: "idle"
+
+    LookalikeRequest:
+      type: object
+      additionalProperties: true
+      required:
+        - merchant_id
+        - offer_id
+        - top_n
+      properties:
+        merchant_id:
+          type: integer
+          description: Merchant ID
+          minimum: 1
+          example: 75
+        offer_id:
+          type: integer
+          description: Offer ID (from the offer table)
+          minimum: 1
+          example: 42
+        top_n:
+          type: integer
+          description: Number of users to return
+          minimum: 1
+          maximum: 1000
+          example: 100
+
+    LookalikeResponse:
+      type: object
+      additionalProperties: true
+      required:
+        - merchant_id
+        - offer_id
+        - audience
+        - audience_size
+        - model_version
+        - reasons
+      properties:
+        merchant_id:
+          type: integer
+        offer_id:
+          type: integer
+        audience:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            required:
+              - user_id
+              - score
+            properties:
+              user_id:
+                type: integer
+              score:
+                type: number
+                format: float
+        audience_size:
+          type: integer
+        model_version:
+          type: string
+        reasons:
+          type: array
+          minItems: 1
+          description: Top factors/features influencing ranking for this response
+          items:
+            type: object
+            additionalProperties: true
+            required:
+              - feature
+              - impact
+            properties:
+              feature:
+                type: string
+              impact:
+                type: number
+                format: float
+
+    ModelInfoResponse:
+      type: object
+      additionalProperties: true
+      required:
+        - model_name
+        - model_version
+        - trained_on
+      properties:
+        model_name:
+          type: string
+          description: Model name
+          example: "lookalike-cf"
+        model_version:
+          type: string
+          description: Current model version
+          example: "2.0"
+        trained_on:
+          type: string
+          description: Data version used to train the model
+          example: "v2"
+        features_count:
+          type: integer
+          description: Number of features
+          example: 47
+        train_metrics:
+          type: object
+          description: Model metrics on the training set
+          additionalProperties:
+            type: number
+          example:
+            precision_at_100: 0.42
+
+    DriftResponse:
+      type: object
+      additionalProperties: true
+      required:
+        - drift_detected
+        - drift_score
+        - action_taken
+      properties:
+        drift_detected:
+          type: boolean
+          description: Drift indicator (implementation-defined)
+        drift_score:
+          type: number
+          format: float
+          description: Numeric drift score
+        action_taken:
+          type: string
+          description: Service action description
+          example: "retrained"
+
+    DataQualityResponse:
+      type: object
+      additionalProperties: true
+      required:
+        - version
+        - valid
+        - checks_total
+        - checks_passed
+        - checks_failed
+        - failed_checks
+      properties:
+        version:
+          type: string
+          description: Data version that was validated
+          example: "v2"
+        valid:
+          type: boolean
+          description: Data passed validation (all critical checks passed)
+          example: true
+        checks_total:
+          type: integer
+          description: Total number of checks (minimum 5)
+          example: 12
+        checks_passed:
+          type: integer
+          description: Number of passed checks
+          example: 11
+        checks_failed:
+          type: integer
+          description: Number of failed checks
+          example: 1
+        failed_checks:
+          type: array
+          description: List of failed checks
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              table:
+                type: string
+                description: Table where the issue was found
+                example: "transaction"
+              check:
+                type: string
+                description: Check name
+                example: "user_id_not_null"
+              details:
+                type: string
+                description: Issue description
+                example: "3 rows with null user_id"
+
+    ExperimentsResponse:
+      type: object
+      additionalProperties: true
+      required:
+        - experiments
+      properties:
+        experiments:
+          type: array
+          description: List of all experiments in the current session
+          items:
+            $ref: "#/components/schemas/ExperimentRun"
+
+    ExperimentRun:
+      type: object
+      additionalProperties: true
+      required:
+        - run_id
+        - data_version
+        - model_version
+        - metrics
+        - timestamp
+      properties:
+        run_id:
+          type: string
+          description: Unique run ID (from MLflow)
+          example: "a1b2c3"
+        data_version:
+          type: string
+          description: Data version used to train the model
+          example: "v2"
+        model_version:
+          type: string
+          description: Resulting model version
+          example: "2.0"
+        metrics:
+          type: object
+          description: Experiment metrics
+          additionalProperties:
+            type: number
+          example:
+            precision_at_100: 0.44
+            map_at_100: 0.41
+        params:
+          type: object
+          description: Experiment parameters
+          additionalProperties:
+            type: string
+        timestamp:
+          type: string
+          format: date-time
+          description: Experiment start time
+          example: "2026-01-15T11:15:00Z"

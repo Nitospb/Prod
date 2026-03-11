@@ -1,0 +1,12 @@
+
+services:
+  app:
+    build: .
+    ports:
+      - "80:80"
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8G
+

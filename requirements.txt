@@ -1,0 +1,11 @@
+pandas>=1.5,<2.1
+numpy>=1.23,<1.25
+scikit-learn>=1.1,<1.4
+lightgbm>=4.0,<5
+joblib>=1.2
+fastapi>=0.95,<0.111
+uvicorn>=0.22,<0.31
+pydantic>=1.10,<2.0
+python-dateutil>=2.8
+scipy>=1.9,<1.14
+

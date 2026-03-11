@@ -1,0 +1,14 @@
+.DS_Store
+__pycache__/
+.venv/
+venv/
+.env
+.idea/
+.vscode/
+v1/
+v2/
+*.zip
+data/
+.dvc/cache/
+mlruns/
+*.log
